@@ -22,9 +22,9 @@ class Settings:
     def github_private_key(self) -> str:
         """Read private key — first try env var (Render), then file (local)."""
         # 1) Try env var (Render deploys use this)
-        from_env = os.getenv("GITHUB_PRIVATE_KEY")
-        if from_env:
-            return from_env.replace("\\n", "\n")
+         from_env = os.getenv("GITHUB_PRIVATE_KEY")
+  if from_env:
+      return from_env.replace("\\n", "\n").strip('"').strip("'")
         # 2) Try file (local dev)
         path = self.GITHUB_PRIVATE_KEY_PATH
         if not os.path.isabs(path):
