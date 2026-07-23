@@ -42,17 +42,6 @@ def health():
     return {"status": "ok"}
 
 
-@app.get("/debug")
-def debug():
-    """Debug endpoint — check config without exposing secrets."""
-    import os
-    key_from_env = os.getenv("GITHUB_PRIVATE_KEY", "")
-    return {
-        "app_id": settings.GITHUB_APP_ID,
-        "key_env_var_exists": bool(key_from_env),
-        "key_env_var_length": len(key_from_env),
-        "key_env_var_starts_with": key_from_env[:50] if key_from_env else "N/A",
-        "ai_key_configured": bool(settings.AI_API_KEY),
-        "ai_model": settings.AI_MODEL,
-        "db_url": settings.DATABASE_URL,
-    }
+ @app.get("/health")
+  def health():
+      return {"status": "ok"}
