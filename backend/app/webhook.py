@@ -5,7 +5,6 @@ import hashlib
 from fastapi import APIRouter, Request, HTTPException, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-
 from app.config import settings
 from app.github import GitHubClient
 from app.ai import analyze_issue, review_pr
@@ -28,24 +27,19 @@ async def webhook(request: Request, db: AsyncSession = Depends(get_db)):
     body = await request.body()
     sig = request.headers.get("x-hub-signature-256", "")
     event = request.headers.get("x-github-event", "")
-
     if not body:
         raise HTTPException(400, "Empty body")
-
     if not verify_signature(body, sig):
         raise HTTPException(403, "Invalid signature")
-
     data = json.loads(body.decode())
     repo_full = data.get("repository", {}).get("full_name", "")
     owner, repo_name = repo_full.split("/") if "/" in repo_full else ("", "")
-
     if event == "issues" and data.get("action") in ("opened", "reopened"):
         await handle_issue(data, owner, repo_name, db)
     elif event == "issue_comment" and data.get("action") == "created":
         await handle_comment(data, owner, repo_name)
     elif event == "pull_request" and data.get("action") in ("opened", "reopened", "synchronize"):
         await handle_pr(data, owner, repo_name, db)
-
     return {"received": True}
 
 
@@ -54,17 +48,14 @@ async def handle_issue(data, owner, repo, db):
     issue = data["issue"]
     result = analyze_issue(issue["title"], issue.get("body", "") or "")
     gh.create_comment(owner, repo, issue["number"], result.get("answer", "Thanks!"))
-    result_obj = await db.execute(
-        select(Repository).where(Repository.full_name == f"{owner}/{repo}")
-    )
-    repo_obj = result_obj.scalar_one_or_none()
-    if repo_obj:
-        db.add(Issue(
-            repo_id=repo_obj.id, issue_number=issue["number"],
-            title=issue["title"], body=issue.get("body", ""),
-            category=result.get("category", ""), priority=result.get("priority", ""),
-            ai_reply=result.get("answer", ""), is_duplicate=result.get("is_duplicate", False),
-        ))
+    r = await db.execute(select(Repository).where(Repository.full_name == f"{owner}/{repo}"))
+    o = r.scalar_one_or_none()
+    if o:
+        db.add(Issue(repo_id=o.id, issue_number=issue["number"],
+                      title=issue["title"], body=issue.get("body", ""),
+                      category=result.get("category", ""),
+                      priority=result.get("priority", ""),
+                      ai_reply=result.get("answer", "")))
         await db.commit()
 
 
