@@ -1,128 +1,177 @@
-"""GitHub webhook handler — the brain of RepoGuardian."""
-import json
-import hmac
+\"\"\"GitHub webhook receiver - handles issues, PRs, and auto-replies.\"\"\"
 import hashlib
-from fastapi import APIRouter, Request, HTTPException, Depends
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+import hmac
+import json
+import logging
 
-from app.config import settings
-from app.github import GitHubClient
+from fastapi import APIRouter, Request, HTTPException
+
 from app.ai import analyze_issue, review_pr
-from app.database import get_db, Repository, Issue
+from app.github import GitHubClient
+from app.config import settings
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-def verify_signature(payload: bytes, signature: str) -> bool:
-    """Verify GitHub webhook signature."""
+def verify_signature(payload_body: bytes, signature_header: str) -> bool:
+    \"\"\"Verify that the webhook payload was signed by GitHub.\"\"\"
     if not settings.GITHUB_WEBHOOK_SECRET:
-        return True  # skip check in dev
+        logger.warning(\"Webhook secret not configured - skipping signature check\")
+        return True
+    hash_type, sig = signature_header.split(\"=\", 1)
     expected = hmac.new(
         settings.GITHUB_WEBHOOK_SECRET.encode(),
-        payload,
-        hashlib.sha256,
+        payload_body,
+        getattr(hashlib, hash_type),
     ).hexdigest()
-    return hmac.compare_digest(f"sha256={expected}", signature)
+    return hmac.compare_digest(expected, sig)
 
 
-@router.post("/webhook")
-async def webhook(request: Request, db: AsyncSession = Depends(get_db)):
+@router.post(\"/webhook\")
+async def webhook(request: Request):
+    \"\"\"Receive GitHub webhook events and process them.\"\"\"
+    # Read raw body
     body = await request.body()
-    sig = request.headers.get("x-hub-signature-256", "")
-    event = request.headers.get("x-github-event", "")
 
-    if not verify_signature(body, sig):
-        raise HTTPException(403, "Invalid signature")
+    # Verify signature
+    sig = request.headers.get(\"x-hub-signature-256\") or request.headers.get(\"x-hub-signature\")
+    if not sig or not verify_signature(body, sig):
+        raise HTTPException(status_code=400, detail=\"Invalid signature\")
 
-    data = json.loads(body)
-    repo_full = data.get("repository", {}).get("full_name", "")
-    owner, repo_name = repo_full.split("/") if "/" in repo_full else ("", "")
+    # Parse event
+    event = request.headers.get(\"x-github-event\", \"\")
+    payload = json.loads(body)
 
-    if event == "issues" and data.get("action") in ("opened", "reopened"):
-        await handle_issue(data, owner, repo_name, db)
+    logger.info(\"Received event: %s\", event)
 
-    elif event == "issue_comment" and data.get("action") == "created":
-        await handle_comment(data, owner, repo_name)
-    elif event == "pull_request" and data.get("action") in (
-        "opened",
-        "reopened",
-        "synchronize",
-    ):
-        await handle_pr(data, owner, repo_name, db)
+    if event == \"ping\":
+        return {\"msg\": \"pong\"}
 
-    return {"received": True}
+    if event == \"issues\" and payload.get(\"action\") in (\"opened\", \"reopened\"):
+        await handle_issue_opened(payload)
+        return {\"status\": \"ok\", \"action\": \"issue_analyzed\"}
 
+    if event == \"issue_comment\" and payload.get(\"action\") == \"created\":
+        await handle_issue_comment(payload)
+        return {\"status\": \"ok\", \"action\": \"comment_processed\"}
 
-async def handle_issue(data: dict, owner: str, repo: str, db: AsyncSession):
-    """Analyze new issue + auto-reply."""
-    gh = GitHubClient(owner, repo)
-    issue = data["issue"]
-    number = issue["number"]
-    title = issue["title"]
-    body = issue.get("body", "") or ""
+    if event == \"pull_request\" and payload.get(\"action\") in (\"opened\", \"reopened\", \"synchronize\"):
+        await handle_pr_opened(payload)
+        return {\"status\": \"ok\", \"action\": \"pr_reviewed\"}
 
-    result = analyze_issue(title, body)
-    gh.create_comment(owner, repo, number, result.get("answer", "Thanks, we'll review this."))
-
-    # Save to DB
-    result_obj = await db.execute(
-        select(Repository).where(Repository.full_name == f"{owner}/{repo}")
-    )
-    repo_obj = result_obj.scalar_one_or_none()
-    if repo_obj:
-        db.add(
-            Issue(
-                repo_id=repo_obj.id,
-                issue_number=number,
-                title=title,
-                body=body,
-                category=result.get("category", ""),
-                priority=result.get("priority", ""),
-                ai_reply=result.get("answer", ""),
-                is_duplicate=result.get("is_duplicate", False),
-            )
-        )
-        await db.commit()
+    # Unhandled event - just acknowledge
+    return {\"status\": \"skipped\", \"event\": event, \"action\": payload.get(\"action\")}
 
 
-async def handle_comment(data: dict, owner: str, repo: str):
-    """Check if comment needs AI response."""
-    gh = GitHubClient(owner, repo)
-    comment = data["comment"]
-    text = comment.get("body", "")
-    if "@repoguardian" in text.lower():
-        gh.create_comment(
-            owner,
-            repo,
-            data["issue"]["number"],
-            "I'm looking into this! 🔍",
-        )
+async def handle_issue_opened(payload: dict):
+    \"\"\"Analyze a new issue and post an AI-generated reply.\"\"\"
+    repo_full = payload[\"repository\"][\"full_name\"]
+    owner, repo = repo_full.split(\"/\")
+    issue = payload[\"issue\"]
+    number = issue[\"number\"]
+    title = issue.get(\"title\", \"\")
+    body_text = issue.get(\"body\", \"\") or \"\"
 
+    logger.info(\"Analyzing issue #%d in %s\", number, repo_full)
 
-async def handle_pr(data: dict, owner: str, repo: str, db: AsyncSession):
-    """Review pull request."""
-    gh = GitHubClient(owner, repo)
-    pr = data["pull_request"]
-    number = pr["number"]
-    title = pr["title"]
-    body = pr.get("body", "") or ""
-
-    # Get diff
-    files = gh.get_pr_files(owner, repo, number)
-    diff_lines = []
-    for f in files[:10]:  # limit to 10 files
-        patch = f.get("patch", "")
-        diff_lines.append(f"--- {f['filename']}\n{patch}")
-
-    if not diff_lines:
+    try:
+        result = analyze_issue(title, body_text)
+    except Exception as e:
+        logger.error(\"AI analysis failed for issue #%d: %s\", number, e)
         return
 
-    result = review_pr("\n".join(diff_lines), title, body)
-    gh.create_pr_review(
-        owner,
-        repo,
-        number,
-        result.get("review_body", "Reviewed by RepoGuardian."),
-        "COMMENT",
-    )
+    answer = result.get(\"answer\", \"\")
+    if not answer:
+        logger.info(\"No auto-reply for issue #%d\", number)
+        return
+
+    try:
+        client = GitHubClient(owner=owner, repo=repo)
+        client.create_comment(owner, repo, number, answer)
+        logger.info(\"Posted reply to issue #%d\", number)
+    except Exception as e:
+        logger.error(\"Failed to post reply to issue #%d: %s\", number, e)
+
+
+async def handle_issue_comment(payload: dict):
+    \"\"\"Reply to comments that @mention the bot.\"\"\"
+    repo_full = payload[\"repository\"][\"full_name\"]
+    owner, repo = repo_full.split(\"/\")
+    comment = payload[\"comment\"]
+    issue = payload[\"issue\"]
+    comment_body = comment.get(\"body\", \"\")
+    number = issue[\"number\"]
+
+    # Only reply if the bot is mentioned or it's a question
+    if not comment_body or (\"@RepoGuardian\" not in comment_body and \"?\" not in comment_body):
+        return
+
+    logger.info(\"Analyzing comment on issue #%d\", number)
+
+    try:
+        result = analyze_issue(issue.get(\"title\", \"\"), comment_body)
+    except Exception as e:
+        logger.error(\"AI analysis failed for comment on #%d: %s\", number, e)
+        return
+
+    answer = result.get(\"answer\", \"\")
+    if not answer:
+        return
+
+    try:
+        client = GitHubClient(owner=owner, repo=repo)
+        client.create_comment(owner, repo, number, answer)
+        logger.info(\"Posted reply to comment on issue #%d\", number)
+    except Exception as e:
+        logger.error(\"Failed to post reply on #%d: %s\", number, e)
+
+
+async def handle_pr_opened(payload: dict):
+    \"\"\"Review a newly opened pull request.\"\"\"
+    repo_full = payload[\"repository\"][\"full_name\"]
+    owner, repo = repo_full.split(\"/\")
+    pr = payload[\"pull_request\"]
+    number = pr[\"number\"]
+    title = pr.get(\"title\", \"\")
+    body_text = pr.get(\"body\", \"\") or \"\"
+
+    logger.info(\"Reviewing PR #%d in %s\", number, repo_full)
+
+    try:
+        client = GitHubClient(owner=owner, repo=repo)
+        files = client.get_pr_files(owner, repo, number)
+    except Exception as e:
+        logger.error(\"Failed to fetch PR #%d files: %s\", number, e)
+        return
+
+    # Build diff summary
+    diff_lines = []
+    for f in files:
+        filename = f.get(\"filename\", \"unknown\")
+        patch = f.get(\"patch\", \"\")
+        status = f.get(\"status\", \"modified\")
+        diff_lines.append(f\"File: {filename} ({status})\")
+        if patch:
+            diff_lines.append(patch[:2000])  # truncate large patches
+    diff_text = \"\n\".join(diff_lines)
+
+    if not diff_text:
+        logger.info(\"No diff content for PR #%d, skipping review\", number)
+        return
+
+    try:
+        result = review_pr(diff_text, title, body_text)
+    except Exception as e:
+        logger.error(\"AI review failed for PR #%d: %s\", number, e)
+        return
+
+    review_body = result.get(\"review_body\", \"\")
+    if not review_body:
+        return
+
+    try:
+        client.create_pr_review(owner, repo, number, review_body)
+        logger.info(\"Posted review on PR #%d\", number)
+    except Exception as e:
+        logger.error(\"Failed to post review on PR #%d: %s\", number, e)
