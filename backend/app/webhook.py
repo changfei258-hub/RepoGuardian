@@ -12,7 +12,6 @@ from app.ai import analyze_issue, review_pr
 from app.database import get_db, Repository, Issue
 
 router = APIRouter()
-gh = GitHubClient()
 
 
 def verify_signature(payload: bytes, signature: str) -> bool:
@@ -57,6 +56,7 @@ async def webhook(request: Request, db: AsyncSession = Depends(get_db)):
 
 async def handle_issue(data: dict, owner: str, repo: str, db: AsyncSession):
     """Analyze new issue + auto-reply."""
+    gh = GitHubClient(owner, repo)
     issue = data["issue"]
     number = issue["number"]
     title = issue["title"]
@@ -88,6 +88,7 @@ async def handle_issue(data: dict, owner: str, repo: str, db: AsyncSession):
 
 async def handle_comment(data: dict, owner: str, repo: str):
     """Check if comment needs AI response."""
+    gh = GitHubClient(owner, repo)
     comment = data["comment"]
     text = comment.get("body", "")
     if "@repoguardian" in text.lower():
@@ -101,6 +102,7 @@ async def handle_comment(data: dict, owner: str, repo: str):
 
 async def handle_pr(data: dict, owner: str, repo: str, db: AsyncSession):
     """Review pull request."""
+    gh = GitHubClient(owner, repo)
     pr = data["pull_request"]
     number = pr["number"]
     title = pr["title"]

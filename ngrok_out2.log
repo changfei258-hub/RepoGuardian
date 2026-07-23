@@ -1,0 +1,9 @@
+t=2026-07-23T15:52:07+0800 lvl=info msg="open config file" path=C:\Users\chang'fei\.config\ngrok\ngrok.yml err=<nil>
+t=2026-07-23T15:52:07+0800 lvl=info msg="FIPS 140 mode" enabled=false
+t=2026-07-23T15:52:07+0800 lvl=info msg="starting web service" obj=web addr=127.0.0.1:4040 allow_hosts=[]
+t=2026-07-23T15:52:08+0800 lvl=info msg="client session established" obj=tunnels.session
+t=2026-07-23T15:52:08+0800 lvl=info msg="tunnel session started" obj=tunnels.session
+t=2026-07-23T15:52:08+0800 lvl=info msg="started tunnel" obj=tunnels name=command_line addr=http://localhost:8000 url=https://cofounder-sage-hatchling.ngrok-free.dev
+t=2026-07-23T15:52:31+0800 lvl=info msg="INFO received stop request obj=app stopReq=\"{err:<nil> restart:false}\""
+t=2026-07-23T15:52:31+0800 lvl=info msg="session closing" obj=tunnels.session err=<nil>
+t=2026-07-23T15:52:31+0800 lvl=info msg="accept failed" obj=tunnels.session err="reconnecting session closed" obj=csess id=e5cd8563fb78
