@@ -20,12 +20,18 @@ class Settings:
 
     @property
     def github_private_key(self) -> str:
-        """Read private key — first try env var (Render), then file (local)."""
-        # 1) Try env var (Render deploys use this)
+        """Read private key — try env var (base64 or raw), then file."""
+        import base64
         from_env = os.getenv("GITHUB_PRIVATE_KEY")
         if from_env:
-            return from_env.replace("\\n", "\n")
-        # 2) Try file (local dev)
+            # Try base64 first (Render-friendly)
+            try:
+                return base64.b64decode(from_env).decode()
+            except Exception:
+                pass
+            # Fallback: literal \n → real newlines
+            return from_env.replace("\\n", "\n").strip('"').strip("'")
+        # File fallback (local dev)
         path = self.GITHUB_PRIVATE_KEY_PATH
         if not os.path.isabs(path):
             path = os.path.join(os.path.dirname(__file__), "..", path)
